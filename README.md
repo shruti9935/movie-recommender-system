@@ -18,8 +18,11 @@ Python Pandas Scikit-learn NLTK Streamlit TMDB API Pickle
 
 Run Locally
 bashgit clone https://github.com/shruti9935/movie-recommender-system.git
+
 cd movie-recommender-system
+
 pip install -r requirements.txt
+
 streamlit run app.py
 
 Add your TMDB API key in .streamlit/secrets.toml as TMDB_API_KEY = "your_key"
