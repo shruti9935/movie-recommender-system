@@ -16,6 +16,25 @@ Deployed with Streamlit + live TMDB API poster fetching
 Tech Stack
 Python Pandas Scikit-learn NLTK Streamlit TMDB API Pickle
 
+# 📂 Project Structure
+
+
+CineMatch/
+│
+├── app.py
+├── movie_recommender.ipynb
+├── movies_dict.pkl
+├── similarity.pkl
+├── requirements.txt
+├── README.md
+│
+├── .streamlit/
+│   └── secrets.toml
+│
+└── datasets/
+    ├── movies.csv
+    └── credits.csv
+
 Run Locally
 bashgit clone https://github.com/shruti9935/movie-recommender-system.git
 
