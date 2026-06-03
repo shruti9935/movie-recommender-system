@@ -1,8 +1,13 @@
  CineMatch — Movie Recommender System
-A content-based movie recommendation engine built with NLP and Machine Learning, deployed live on Streamlit.
+CineMatch is a Content-Based Movie Recommendation System that suggests movies similar to a user's selected movie.
+
+The recommendation engine analyzes movie metadata such as genres, cast, crew, keywords, and plot descriptions to identify similar movies using Natural Language Processing (NLP) techniques and Cosine Similarity.
+
+The project is deployed as an interactive Streamlit web application with movie posters, ratings, and filtering capabilities.
 
 What It Does
 Given any movie from 4,800+ titles, it recommends 5 similar movies with live posters fetched from the TMDB API — based on genres, cast, director, keywords and plot.
+
 Try it live → https://movie-recommender-systemgit-22rxlr8dfrxzbchywpyxnn.streamlit.app/
 
  How It Works
@@ -16,8 +21,43 @@ Deployed with Streamlit + live TMDB API poster fetching
 Tech Stack
 Python Pandas Scikit-learn NLTK Streamlit TMDB API Pickle
 
-# 📂 Project Structure
+⚙️ Project Workflow
+1. Data Collection
+Load movies dataset
+Load credits dataset
+2. Data Preprocessing
+Merge datasets
+Remove irrelevant columns
+Handle missing values
+3. Feature Engineering
 
+Extract:
+
+Genres
+Keywords
+Top Cast Members
+Director
+Overview
+
+Combine them into a single feature called tags.
+
+4. Text Processing
+Convert text to lowercase
+Remove spaces
+Apply Porter Stemming
+5. Vectorization
+
+Use CountVectorizer to convert text into numerical vectors.
+
+6. Similarity Computation
+
+Calculate Cosine Similarity between movie vectors.
+
+7. Recommendation Generation
+
+Return the most similar movies based on similarity scores.
+
+# 📂 Project Structure
 
 CineMatch/
 │
