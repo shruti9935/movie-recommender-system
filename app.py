@@ -337,7 +337,7 @@ with st.sidebar:
 # ---------------- HERO HEADER ---------------- #
 st.markdown("""
 <div class='hero'>
-    <div class='hero-tag'>✦ AI-Powered Discovery</div>
+    <div class='hero-tag'>✦ CineMatch</div>
     <div class='hero-title'>Find Your Next<br><span>Favourite Film</span></div>
     <div class='hero-subtitle'>Content-based recommendations across 4,800+ movies</div>
 </div>
