@@ -1,0 +1,19 @@
+# secrets — never commit
+.env
+.env.*
+!.env.example
+.streamlit/secrets.toml
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# IDE
+.idea/
+.vscode/
+
+# datasets — ~45 MB, needed only to rebuild the model (see README)
+tmdb_5000_movies.csv
+tmdb_5000_credits.csv

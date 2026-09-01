@@ -1,5 +1,10 @@
-streamlit
-pandas
-requests
-scikit-learn
-numpy
+# --- app runtime ---
+streamlit>=1.40
+pandas>=2.2
+numpy>=2.0
+requests>=2.32
+python-dotenv>=1.0
+
+# --- model building only (notebook + scripts/build_model.py) ---
+scikit-learn>=1.5
+nltk>=3.9

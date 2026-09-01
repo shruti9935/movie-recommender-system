@@ -1,7 +1,34 @@
 import streamlit as st
 import pickle
+import os
+import html
 import pandas as pd
 import requests
+from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
+from pathlib import Path
+from dotenv import load_dotenv
+
+load_dotenv()  # local dev: reads TMDB_API_KEY from .env
+
+# Resolve model files against this file, not the working directory, so
+# `streamlit run /path/to/app.py` works from anywhere.
+BASE_DIR = Path(__file__).resolve().parent
+
+EARLIEST_YEAR = 1950
+CURRENT_YEAR = datetime.now().year
+
+# Inline so the fallback has no third-party dependency of its own -- the old
+# via.placeholder.com host no longer resolves, which left even the "no image"
+# case showing a broken image.
+NO_IMAGE = (
+    "data:image/svg+xml;utf8,"
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 450">'
+    '<rect width="300" height="450" fill="%231a1a24"/>'
+    '<text x="150" y="225" fill="%23c8a97e" font-family="sans-serif" '
+    'font-size="16" text-anchor="middle">No Image</text></svg>'
+)
 
 # ---------------- PAGE CONFIG ---------------- #
 st.set_page_config(
@@ -202,110 +229,212 @@ html, body, [data-testid="stAppViewContainer"] {
 # ---------------- LOAD DATA ---------------- #
 @st.cache_resource
 def load_data():
-    movies_dict = pickle.load(open('movies_dict.pkl', 'rb'))
-    movies = pd.DataFrame(movies_dict)
-    similarity = pickle.load(open('similarity.pkl', 'rb'))
-    return movies, similarity
+    with open(BASE_DIR / 'movies_dict.pkl', 'rb') as f:
+        movies = pd.DataFrame(pickle.load(f)).reset_index(drop=True)
 
-movies, similarity = load_data()
+    # Precomputed top-20 rankings -- see scripts/build_neighbours.py.
+    # similarity.pkl is kept in the repo as the model artifact but is never read
+    # at runtime: it is 185 MB, and only the ordering it implies is ever needed.
+    with open(BASE_DIR / 'neighbours.pkl', 'rb') as f:
+        neighbours = pickle.load(f)
 
-# ---------------- API KEY (SECURE) ---------------- #
-# Store your key in Streamlit secrets: Settings > Secrets > TMDB_API_KEY = "your_key"
-# For local dev, create .streamlit/secrets.toml with: TMDB_API_KEY = "your_key"
+    return movies, neighbours
+
+
+@st.cache_data
+def build_labels(titles):
+    """Disambiguate the handful of titles that appear more than once, so every
+    entry in the selectbox is reachable."""
+    counts = Counter(titles)
+    seen = {}
+    labels = []
+    for title in titles:
+        if counts[title] == 1:
+            labels.append(title)
+        else:
+            seen[title] = seen.get(title, 0) + 1
+            labels.append(f"{title} ({seen[title]})")
+    return labels
+
+
+try:
+    movies, neighbours = load_data()
+except FileNotFoundError as exc:
+    st.error(
+        f"**Missing model file:** `{Path(exc.filename).name}`. Generate the model "
+        "files with `python scripts/build_model.py` (needs the two TMDB CSVs — see "
+        "the README), or `python scripts/build_neighbours.py` if you only need to "
+        "rebuild `neighbours.pkl` from an existing `similarity.pkl`."
+    )
+    st.stop()
+
+labels = build_labels(tuple(movies['title']))
+
+# ---------------- API KEY ---------------- #
+# Local dev  : put TMDB_API_KEY=<key> in .env  (gitignored)
+# Streamlit  : Settings > Secrets > TMDB_API_KEY = "<key>"
 def get_api_key():
+    key = os.getenv("TMDB_API_KEY")
+    if key:
+        return key
     try:
         return st.secrets["TMDB_API_KEY"]
     except Exception:
-        # Fallback for local testing only — remove before making repo public
-        return ""
+        return None
+
+
+API_KEY = get_api_key()
+if not API_KEY:
+    st.error(
+        "**TMDB_API_KEY is not set.** Add `TMDB_API_KEY=your_key` to a `.env` file "
+        "in the project root, or set it under Settings > Secrets when deploying "
+        "to Streamlit Community Cloud."
+    )
+    st.stop()
 
 # ---------------- POSTER FUNCTION ---------------- #
-@st.cache_data(show_spinner=False)
-def fetch_poster(movie_id):
+def _fetch_poster_raw(movie_id):
+    """Plain and uncached so it is safe to call from worker threads.
+
+    Never touch st.* in here -- Streamlit's cache and script context are not
+    available off the main thread.
+
+    Returns (poster, rating, year, status). `status` distinguishes "TMDB says
+    this film has no poster" from "TMDB never answered"; without it a rejected
+    API key looked exactly like a catalogue of films with missing artwork.
+    """
+    url = f"https://api.themoviedb.org/3/movie/{movie_id}?api_key={API_KEY}&language=en-US"
     try:
-        api_key = get_api_key()
-        url = f"https://api.themoviedb.org/3/movie/{movie_id}?api_key={api_key}&language=en-US"
         response = requests.get(url, timeout=5)
-        if response.status_code != 200:
-            return "https://via.placeholder.com/300x450?text=No+Image", None, None
+    except requests.RequestException:
+        return NO_IMAGE, None, None, 'unreachable'
+
+    if response.status_code in (401, 403):
+        return NO_IMAGE, None, None, 'unauthorized'
+    if response.status_code == 429:
+        return NO_IMAGE, None, None, 'rate_limited'
+    if response.status_code != 200:
+        return NO_IMAGE, None, None, 'error'
+
+    try:
         data = response.json()
-        poster_path = data.get('poster_path')
-        full_path = (
-            "https://image.tmdb.org/t/p/w500/" + poster_path
-            if poster_path else
-            "https://via.placeholder.com/300x450?text=No+Image"
+    except ValueError:
+        return NO_IMAGE, None, None, 'error'
+
+    poster_path = data.get('poster_path')
+    full_path = (
+        "https://image.tmdb.org/t/p/w500/" + poster_path
+        if poster_path else
+        NO_IMAGE
+    )
+    rating = data.get('vote_average')
+    release = data.get('release_date') or ''
+    return (
+        full_path,
+        round(rating, 1) if rating is not None else None,
+        release[:4] if release else None,
+        'ok',
+    )
+
+
+def fetch_posters(movie_ids):
+    """Fetch a batch concurrently, remembering only the successes.
+
+    Deliberately a hand-rolled session cache rather than @st.cache_data: that
+    memoises whatever the function returned, so a single TMDB blip pinned broken
+    placeholders to those films for the life of the process -- and a Streamlit
+    Cloud app stays up for days. Caching per movie rather than per batch also
+    means overlapping recommendations reuse earlier fetches.
+    """
+    cache = st.session_state.setdefault('poster_cache', {})
+    missing = [m for m in dict.fromkeys(movie_ids) if m not in cache]
+
+    fresh = {}
+    if missing:
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            for mid, result in zip(missing, pool.map(_fetch_poster_raw, missing)):
+                fresh[mid] = result
+                if result[3] == 'ok':
+                    cache[mid] = result
+
+    return {m: cache.get(m) or fresh[m] for m in movie_ids}
+
+
+# ---------------- RECOMMEND FUNCTION ---------------- #
+def _report_fetch_problems(details):
+    """Say so when TMDB did not answer.
+
+    Recommendations themselves are local, so a TMDB outage still produces five
+    correct titles -- just with no artwork, and with the rating and year filters
+    unable to do anything. Previously that was indistinguishable from a working
+    app, which made a revoked key impossible to diagnose from the UI.
+    """
+    statuses = {d[3] for d in details.values()}
+
+    if 'unauthorized' in statuses:
+        st.error(
+            "**TMDB rejected the API key.** Recommendations below are still correct, "
+            "but posters, ratings and release years are unavailable and the sidebar "
+            "filters cannot be applied. Check `TMDB_API_KEY`."
         )
-        rating = data.get('vote_average', 0)
-        release = data.get('release_date', '')
-        year = release[:4] if release else 'N/A'
-        return full_path, round(rating, 1), year
-    except Exception:
-        return "https://via.placeholder.com/300x450?text=No+Image", None, None
+    elif 'rate_limited' in statuses:
+        st.warning(
+            "**TMDB rate limit reached.** Some posters and ratings are missing, and "
+            "the sidebar filters skip those titles."
+        )
+    elif statuses - {'ok'}:
+        st.warning(
+            "Could not reach TMDB for some titles — posters and ratings may be "
+            "missing, and the sidebar filters skip those titles."
+        )
 
-# ---------------- FETCH MOVIE DETAILS ---------------- #
-@st.cache_data(show_spinner=False)
-def fetch_movie_details(movie_id):
-    try:
-        api_key = get_api_key()
-        url = f"https://api.themoviedb.org/3/movie/{movie_id}?api_key={api_key}&language=en-US"
-        response = requests.get(url, timeout=5)
-        if response.status_code != 200:
-            return {}
-        return response.json()
-    except Exception:
-        return {}
 
-# ---------------- RECOMMEND FUNCTION (FIXED) ---------------- #
-def recommend(movie, min_rating=0.0, year_range=(1950, 2024)):
-    try:
-        movie_index = movies[movies['title'] == movie].index[0]
-    except IndexError:
-        st.error(f"Movie '{movie}' not found in the database.")
-        return [], []
+def recommend(position, min_rating=0.0, year_range=(EARLIEST_YEAR, CURRENT_YEAR)):
+    """`position` is a row offset into `movies`, which is also the row offset
+    into `neighbours`. Taking a position rather than a title keeps the two
+    aligned by construction -- looking a title up returned an index *label*,
+    which silently diverges from the positional offset the moment any row is
+    dropped upstream."""
+    if not 0 <= position < len(movies):
+        st.error("That movie is no longer in the database.")
+        return [], [], [], []
 
-    distances = similarity[movie_index]
-    movie_list = sorted(
-        list(enumerate(distances)),
-        reverse=True,
-        key=lambda x: x[1]
-    )[1:21]  # Fetch top 20 to allow filtering
+    candidates = [int(i) for i in neighbours[position]]
+    movie_ids = tuple(int(movies.iloc[i].movie_id) for i in candidates)
+    details = fetch_posters(movie_ids)
+    _report_fetch_problems(details)
 
-    recommended_names = []
-    recommended_posters = []
-    recommended_ratings = []
-    recommended_years = []
+    names, posters, ratings, years = [], [], [], []
 
-    for i in movie_list:
-        mid = movies.iloc[i[0]].movie_id
-        poster, rating, year = fetch_poster(mid)
+    for pos, mid in zip(candidates, movie_ids):
+        poster, rating, year, _status = details[mid]
 
-        # Apply sidebar filters
+        # Apply sidebar filters. A missing rating or year means TMDB did not tell
+        # us, so the film is kept rather than silently dropped.
         if rating is not None and rating < min_rating:
             continue
-        if year and year.isdigit():
-            if not (year_range[0] <= int(year) <= year_range[1]):
-                continue
+        if year and year.isdigit() and not (year_range[0] <= int(year) <= year_range[1]):
+            continue
 
-        recommended_names.append(movies.iloc[i[0]].title)
-        recommended_posters.append(poster)
-        recommended_ratings.append(rating)
-        recommended_years.append(year)
+        names.append(movies.iloc[pos].title)
+        posters.append(poster)
+        ratings.append(rating)
+        years.append(year)
 
-        if len(recommended_names) == 5:
+        if len(names) == 5:
             break
 
-    # If filters are too strict, fill remaining with unfiltered results
-    if len(recommended_names) == 0:
+    # If filters are too strict, fall back to the unfiltered top 5
+    if not names:
         st.warning("No results match your filters. Showing top recommendations instead.")
-        for i in movie_list[:5]:
-            mid = movies.iloc[i[0]].movie_id
-            poster, rating, year = fetch_poster(mid)
-            recommended_names.append(movies.iloc[i[0]].title)
-            recommended_posters.append(poster)
-            recommended_ratings.append(rating)
-            recommended_years.append(year)
+        for pos, mid in list(zip(candidates, movie_ids))[:5]:
+            poster, rating, year, _status = details[mid]
+            names.append(movies.iloc[pos].title)
+            posters.append(poster)
+            ratings.append(rating)
+            years.append(year)
 
-    return recommended_names, recommended_posters, recommended_ratings, recommended_years
+    return names, posters, ratings, years
 
 # ---------------- SIDEBAR ---------------- #
 with st.sidebar:
@@ -314,7 +443,9 @@ with st.sidebar:
     min_rating = st.slider("⭐ Minimum Rating", 0.0, 10.0, 0.0, 0.5,
                            help="Filter recommendations by minimum TMDB rating")
 
-    year_range = st.slider("📅 Release Year Range", 1950, 2024, (1980, 2024),
+    year_range = st.slider("📅 Release Year Range",
+                           EARLIEST_YEAR, CURRENT_YEAR,
+                           (EARLIEST_YEAR, CURRENT_YEAR),
                            help="Only show movies within this release window")
 
     st.markdown("---")
@@ -323,7 +454,7 @@ with st.sidebar:
     <b style='color:#c8a97e;font-size:13px;'>How it works</b><br><br>
     This system uses <b>Content-Based Filtering</b>.<br><br>
     Movies are matched by combining genres, cast, director, keywords & plot — 
-    then ranked using <b>Cosine Similarity</b> across 4800+ titles.
+    then ranked using <b>Cosine Similarity</b> across 4,800 titles.
     </div>
     """, unsafe_allow_html=True)
 
@@ -339,7 +470,7 @@ st.markdown("""
 <div class='hero'>
     <div class='hero-tag'>✦ CineMatch</div>
     <div class='hero-title'>Find Your Next<br><span>Favourite Film</span></div>
-    <div class='hero-subtitle'>Content-based recommendations across 4,800+ movies</div>
+    <div class='hero-subtitle'>Content-based recommendations across 4,800 movies</div>
 </div>
 <div class='divider'></div>
 """, unsafe_allow_html=True)
@@ -348,10 +479,10 @@ st.markdown("""
 col_select, col_btn = st.columns([4, 1], gap="medium")
 
 with col_select:
-    movies_list = movies['title'].tolist()
-    selected_movie_name = st.selectbox(
+    selected_position = st.selectbox(
         "CHOOSE A MOVIE",
-        movies_list,
+        options=range(len(movies)),
+        format_func=lambda i: labels[i],
         index=0,
         label_visibility="visible"
     )
@@ -363,10 +494,18 @@ with col_btn:
 st.markdown("<div class='divider'></div>", unsafe_allow_html=True)
 
 # ---------------- RESULTS ---------------- #
+# Buttons are only True on the run that handled the click, so gating the results
+# on `recommend_btn` alone wiped them the moment a sidebar filter moved -- which
+# is exactly what a user reaches for next. Latch it instead and recompute: the
+# candidates are unchanged and their posters are already cached, so re-filtering
+# costs no extra requests and the filters now apply live.
 if recommend_btn:
+    st.session_state['show_results'] = True
+
+if st.session_state.get('show_results'):
     with st.spinner("Curating your recommendations..."):
         names, posters, ratings, years = recommend(
-            selected_movie_name,
+            selected_position,
             min_rating=min_rating,
             year_range=year_range
         )
@@ -378,14 +517,23 @@ if recommend_btn:
         for idx, col in enumerate(cols):
             if idx < len(names):
                 with col:
-                    rating_str = f"⭐ {ratings[idx]}" if ratings[idx] else ""
-                    year_str = f"· {years[idx]}" if years[idx] else ""
+                    # Joined rather than concatenated so a missing rating does not
+                    # leave the separator dangling in front of the year.
+                    meta = " · ".join(
+                        part for part in (
+                            f"⭐ {ratings[idx]}" if ratings[idx] is not None else "",
+                            years[idx] or "",
+                        ) if part
+                    )
+                    # 217 titles contain an apostrophe and 61 contain &/</>,
+                    # which break out of the single-quoted attribute below.
+                    safe_title = html.escape(names[idx], quote=True)
                     st.markdown(f"""
                     <div class='movie-card'>
-                        <img src='{posters[idx]}' alt='{names[idx]}'/>
+                        <img src='{posters[idx]}' alt='{safe_title}'/>
                         <div class='movie-card-title'>
-                            {names[idx]}<br>
-                            <span style='font-size:11px;color:rgba(200,169,126,0.8);'>{rating_str} {year_str}</span>
+                            {safe_title}<br>
+                            <span style='font-size:11px;color:rgba(200,169,126,0.8);'>{meta}</span>
                         </div>
                     </div>
                     """, unsafe_allow_html=True)
