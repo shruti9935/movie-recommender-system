@@ -41,31 +41,32 @@ cd movie-recommender-system
 pip install -r requirements.txt
 ```
 
-Get a free API key from [TMDB](https://www.themoviedb.org/settings/api), then create a
-`.env` file in the project root:
-
-```bash
-cp .env.example .env
-# then edit .env and set your key
-TMDB_API_KEY=your_key_here
-```
-
 ```bash
 streamlit run app.py
 ```
 
-`.env` is gitignored — never commit it.
+That's it — a working TMDB key ships in `.streamlit/secrets.toml`, so there is
+nothing to configure.
+
+### About the key
+
+The committed key is **public and disposable**. It is a read-only TMDB key used
+only to fetch posters, ratings and release years; recommendations are computed
+locally and work without it. To use your own instead, get one free from
+[TMDB](https://www.themoviedb.org/settings/api) and pick whichever is convenient:
+
+| Where | How | Wins over |
+|---|---|---|
+| `.env` in the project root | `TMDB_API_KEY=your_key` | everything |
+| Streamlit → Settings → Secrets | `TMDB_API_KEY = "your_key"` | the committed file |
+| `.streamlit/secrets.toml` | edit the line in place | — |
+
+`.env` stays gitignored, so a personal key put there is never committed.
 
 ### Deploying to Streamlit Community Cloud
 
-`.env` files are not uploaded. Set the key under **Settings → Secrets** instead:
-
-```toml
-TMDB_API_KEY = "your_key_here"
-```
-
-The app reads `.env` first and falls back to `st.secrets`, so the same code works in
-both places.
+Point it at this repo and deploy. No secrets configuration is needed, because
+`.streamlit/secrets.toml` is committed.
 
 ---
 

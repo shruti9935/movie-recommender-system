@@ -271,8 +271,36 @@ except FileNotFoundError as exc:
 labels = build_labels(tuple(movies['title']))
 
 # ---------------- API KEY ---------------- #
-# Local dev  : put TMDB_API_KEY=<key> in .env  (gitignored)
-# Streamlit  : Settings > Secrets > TMDB_API_KEY = "<key>"
+# Checked in order:
+#   1. TMDB_API_KEY in the environment (or a .env file, for local overrides)
+#   2. st.secrets -- the Streamlit dashboard value, when one is set
+#   3. the committed .streamlit/secrets.toml, which is what makes the deployed
+#      app work with no configuration at all
+def _key_from_secrets_file():
+    """Read .streamlit/secrets.toml next to this file.
+
+    st.secrets resolves that path against the working directory, so it misses
+    when the app is launched from elsewhere -- `streamlit run /path/to/app.py`.
+    Model files are already resolved against BASE_DIR; this keeps the key
+    consistent with them.
+    """
+    path = BASE_DIR / '.streamlit' / 'secrets.toml'
+    if not path.exists():
+        return None
+    try:
+        import tomllib
+        with open(path, 'rb') as f:
+            return tomllib.load(f).get("TMDB_API_KEY")
+    except ModuleNotFoundError:  # Python < 3.11
+        for line in path.read_text(encoding='utf-8').splitlines():
+            name, sep, value = line.partition('=')
+            if sep and name.strip() == "TMDB_API_KEY":
+                return value.strip().strip('"').strip("'") or None
+    except (OSError, ValueError):
+        return None
+    return None
+
+
 def get_api_key():
     key = os.getenv("TMDB_API_KEY")
     if key:
@@ -280,15 +308,17 @@ def get_api_key():
     try:
         return st.secrets["TMDB_API_KEY"]
     except Exception:
-        return None
+        pass
+    return _key_from_secrets_file()
 
 
 API_KEY = get_api_key()
 if not API_KEY:
     st.error(
-        "**TMDB_API_KEY is not set.** Add `TMDB_API_KEY=your_key` to a `.env` file "
-        "in the project root, or set it under Settings > Secrets when deploying "
-        "to Streamlit Community Cloud."
+        "**TMDB_API_KEY is not set.** The repository ships a key in "
+        "`.streamlit/secrets.toml`; if that file is missing, add "
+        "`TMDB_API_KEY=your_key` to a `.env` file in the project root, or set it "
+        "under Settings > Secrets when deploying to Streamlit Community Cloud."
     )
     st.stop()
 

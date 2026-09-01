@@ -1,8 +1,10 @@
-# secrets — never commit
+# local env file — not used for deployment, keep it out of the repo
 .env
 .env.*
 !.env.example
-.streamlit/secrets.toml
+
+# NOTE: .streamlit/secrets.toml IS committed on purpose. The TMDB key is public
+# and disposable, so the deployed app works with no dashboard configuration.
 
 # python
 __pycache__/
